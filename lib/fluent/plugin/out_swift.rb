@@ -12,11 +12,6 @@ module Fluent::Plugin
 
     helpers :compat_parameters, :formatter, :inject
 
-    def initialize
-      super
-      @uuid_flush_enabled = false
-    end
-
     desc "Path prefix of the files on Swift"
     config_param :path, :string, :default => ""
     # openstack auth
@@ -36,6 +31,8 @@ module Fluent::Plugin
     desc "Authentication Region. Optional, not required if there is only one region available. set a value or `#{ENV['OS_REGION_NAME']}`"
     config_param :auth_region,   :string, default: nil
     config_param :swift_account, :string, default: nil
+    desc "Storage URL. set a value or `#{ENV['OS_STORAGE_URL']}`"
+    config_param :storage_url,      :string, default: nil
 
     desc "Swift container name"
     config_param :swift_container, :string
@@ -72,6 +69,13 @@ module Fluent::Plugin
 
     MAX_HEX_RANDOM_LENGTH = 16
 
+    def initialize
+      super
+      @uuid_flush_enabled = false
+      # use the global logger
+      @log = $log # rubocop:disable Style/GlobalVars
+    end
+
     def configure(conf)
       compat_parameters_convert(conf, :buffer, :formatter, :inject)
 
@@ -87,13 +91,13 @@ module Fluent::Plugin
      raise Fluent::ConfigError, "auth_api_key parameter or OS_PASSWORD variable not defined"
     end
 
-    if @project_name.empty?
-     raise Fluent::ConfigError, "project_name parameter or OS_PROJECT_NAME variable not defined"
-    end
-    if @domain_name.empty?
-     raise Fluent::ConfigError, "domain_name parameter or OS_PROJECT_DOMAIN_NAME variable not defined"
-    end
-
+#    if @project_name.empty?
+#     raise Fluent::ConfigError, "project_name parameter or OS_PROJECT_NAME variable not defined"
+#    end
+#    if @domain_name.empty?
+#     raise Fluent::ConfigError, "domain_name parameter or OS_PROJECT_DOMAIN_NAME variable not defined"
+#    end
+#
     @ext, @mime_type = case @store_as
       when 'gzip' then ['gz', 'application/x-gzip']
       when 'lzo' then
@@ -123,6 +127,8 @@ module Fluent::Plugin
       @configured_time_slice_format = conf['time_slice_format']
       @values_for_swift_object_chunk = {}
       @time_slice_with_tz = Fluent::Timezone.formatter(@timekey_zone, @configured_time_slice_format || timekey_to_timeformat(@buffer_config['timekey']))
+
+      @write_request = method(:write_object_with_token)
     end
 
     def multi_workers_ready?
@@ -130,26 +136,12 @@ module Fluent::Plugin
     end
 
     def start
+      @log.info('start init_api_client')
+      super
+      init_api_client
+    end
 
-      Excon.defaults[:ssl_verify_peer] = @ssl_verify
-
-      begin
-        @storage = Fog::OpenStack::Storage.new(openstack_auth_url: @auth_url,
-                      openstack_username: @auth_user,
-                      openstack_project_name: @project_name,
-                      openstack_domain_name: @domain_name,
-                      openstack_api_key: @auth_api_key,
-                      openstack_region: @auth_region)
-#      rescue Fog::OpenStack::Storage::NotFound
-        # ignore NoSuchBucket Error because ensure_bucket checks it.
-      rescue => e
-        raise "can't call Swift API. Please check your ENV OS_*, your credentials or auth_url configuration. error = #{e.inspect}"
-      end
-
-      @storage.change_account @swift_account if @swift_account
-
-      check_container
-
+    def shutdown
       super
     end
 
@@ -222,11 +214,12 @@ module Fluent::Plugin
           tmp.close
         end
         File.open(tmp.path) do |file|
-          @storage.put_object(@swift_container, swift_path, file, {:content_type => @mime_type})
+          @write_request.call(@swift_container, swift_path, file, {:content_type => @mime_type})
+#          @storage.put_object(@swift_container, swift_path, file, {:content_type => @mime_type})
         @values_for_swift_object_chunk.delete(chunk.unique_id)
         end
         # log.debu "out_swift: write chunk #{dump_unique_id_hex(chunk.unique_id)} with metadata #{chunk.metadata} to swift://#{@swift_container}/#{swift_path}"
-#        $log.info "out_swift: Put Log to Swift. container=#{@swift_container} object=#{swift_path}"
+#        @log.info "out_swift: Put Log to Swift. container=#{@swift_container} object=#{swift_path}"
       ensure
         tmp.close(true) rescue nil
         w.close rescue nil
@@ -235,6 +228,59 @@ module Fluent::Plugin
     end
 
     private
+
+    def init_api_client
+      Excon.defaults[:ssl_verify_peer] = @ssl_verify
+
+      creds_auth = { openstack_auth_url: @auth_url,
+		     openstack_username: @auth_user,
+		     openstack_api_key:  @auth_api_key
+      }
+      creds_auth[:openstack_project_name]   = @project_name if (@project_name)
+      creds_auth[:openstack_domain_name]    = @domain_name  if (@domain_name)
+      creds_auth[:openstack_region]         = @auth_region  if (@auth_region)
+      creds_auth[:openstack_management_url] = @storage_url  if (@storage_url)
+
+      if !creds_auth[:openstack_management_url].nil?
+        begin
+          token = Fog::OpenStack::Auth::Token.build(creds_auth, {})
+        rescue Fog::OpenStack::Auth::Token::URLError
+        rescue => e
+          raise "Erreur: error #{e.inspect}"
+        end
+        @log.info "Token: #{token.get}"
+        @log.info "Expired: #{token.expires}"
+        creds_auth[:openstack_auth_token] = token.get if (token)
+      end
+
+      begin
+        @storage = Fog::OpenStack::Storage.new(creds_auth)
+#      rescue Fog::OpenStack::Storage::NotFound
+        # ignore NoSuchBucket Error because ensure_bucket checks it.
+      rescue => e
+        raise "can't call Swift API. Please check your ENV OS_*, your credentials or auth_url configuration. error = #{e.inspect}"
+      end
+
+      @storage.change_account(@swift_account) if (@swift_account)
+
+      check_container
+      @log.info "Successfully init_api_client #{@storage.inspect}"
+    end
+
+    def api_client
+      # Take care of tokens
+#      if ! service.instance_variable_get(:@openstack_can_reauthenticate)
+#      end
+
+      @log.info "Successfully token to swift object. #{@storage.inspect}"
+      @storage
+    end
+
+    def write_object_with_token(swift_container, swift_path, file, options)
+      client = api_client
+      client.put_object(swift_container, swift_path, file, options)
+      @log.info "Successfully sent to swift object. #{client.inspect}"
+    end
 
     def hex_random(chunk)
       unique_hex = Fluent::UniqueId.hex(chunk.unique_id)
@@ -260,9 +306,10 @@ module Fluent::Plugin
     def check_container
       begin
         @storage.get_container(@swift_container)
+        @log.info("check_container #{@swift_container} on #{@auth_url}, #{@swift_account}")
       rescue Fog::OpenStack::Storage::NotFound
         if @auto_create_container
-          $log.info "Creating container #{@swift_container} on #{@auth_url}, #{@swift_account}"
+          @log.info "Creating container #{@swift_container} on #{@auth_url}, #{@swift_account}"
           @storage.put_container(@swift_container)
         else
           raise "The specified container does not exist: container = #{swift_container}"

@@ -1,0 +1,8 @@
+export OS_USERNAME=test2
+export OS_PASSWORD=test2
+export OS_PROJECT_NAME=test2
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://cloud:5000/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_REGION_NAME="RegionOne"

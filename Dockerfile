@@ -19,5 +19,5 @@ RUN buildDeps="sudo make gcc g++ libc-dev ruby-dev build-essential git zlib1g-de
     sudo -E gem install -V --no-rdoc --no-ri $gem_args bundler ) && \
     [  -z "$RUBY_URL" ] || bundle config mirror.https://rubygems.org $RUBY_URL ; \
     bundler install && \
-    bundle exec rake test && \
-    bundle exec rake build
+    bundle exec rake build && \
+    bundle exec rake test
