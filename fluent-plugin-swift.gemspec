@@ -21,7 +21,7 @@ Gem::Specification.new do |gem|
   gem.add_runtime_dependency "fog-openstack"
   gem.add_runtime_dependency "uuidtools"
   gem.add_development_dependency "flexmock", ">= 1.2.0"
-  gem.add_development_dependency "bundler", "~> 1.14"
+  gem.add_development_dependency "bundler", ">= 1.14"
   gem.add_development_dependency "rake", "~> 12.0"
   gem.add_development_dependency "test-unit", ">= 3.1.0"
 # fog
